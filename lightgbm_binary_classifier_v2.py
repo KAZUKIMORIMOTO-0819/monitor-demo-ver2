@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LightGBM Binary Classification + SageMaker Model Monitor v2
+Scikit-learn Binary Classification + SageMaker Model Monitor v2
 改良版実装：
 - より堅牢なエラーハンドリング
 - 詳細なログ出力
@@ -13,7 +13,7 @@ import sagemaker
 import boto3
 import pandas as pd
 import numpy as np
-import lightgbm as lgb
+from sklearn.ensemble import GradientBoostingClassifier
 import json
 import os
 import time
@@ -51,9 +51,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class LightGBMBinaryClassifierV2:
+class ScikitLearnBinaryClassifierV2:
     """
-    LightGBM 2値分類モデル + SageMaker Model Monitor v2
+    Scikit-learn 2値分類モデル + SageMaker Model Monitor v2
     """
     
     def __init__(self, config=None):
@@ -82,25 +82,20 @@ class LightGBMBinaryClassifierV2:
             'val_size': 0.1,
             'random_state': 42,
             
-            # LightGBMパラメータ
-            'lgb_params': {
-                'objective': 'binary',
-                'metric': 'binary_logloss',
-                'boosting_type': 'gbdt',
-                'num_leaves': 31,
-                'learning_rate': 0.05,
-                'feature_fraction': 0.9,
-                'bagging_fraction': 0.8,
-                'bagging_freq': 5,
-                'verbose': -1,
+            # Scikit-learnパラメータ
+            'sklearn_params': {
+                'n_estimators': 100,
+                'learning_rate': 0.1,
+                'max_depth': 3,
+                'min_samples_split': 2,
+                'min_samples_leaf': 1,
+                'subsample': 0.8,
                 'random_state': 42
             },
-            'num_boost_round': 100,
-            'early_stopping_rounds': 10,
             
             # デプロイ設定
-            'model_name': f'lightgbm-binary-v2-{int(time.time())}',
-            'endpoint_name': f'lightgbm-binary-endpoint-v2-{int(time.time())}',
+            'model_name': f'sklearn-binary-v2-{int(time.time())}',
+            'endpoint_name': f'sklearn-binary-endpoint-v2-{int(time.time())}',
             'instance_type': 'ml.m5.large',
             'initial_instance_count': 1,
             
@@ -116,7 +111,7 @@ class LightGBMBinaryClassifierV2:
             'max_runtime_seconds': 3600,
             
             # S3設定
-            's3_prefix': 'lightgbm-binary-classification-v2',
+            's3_prefix': 'sklearn-binary-classification-v2',
             'model_artifacts_path': 'model',
             'baseline_path': 'baseline',
             'monitoring_reports_path': 'monitoring-reports',
@@ -144,7 +139,7 @@ class LightGBMBinaryClassifierV2:
         self.predictor = None
         self.monitor = None
         
-        logger.info(f"LightGBM Binary Classifier v2 initialized")
+        logger.info(f"Scikit-learn Binary Classifier v2 initialized")
         logger.info(f"Bucket: {self.bucket}")
         logger.info(f"Region: {self.region}")
         logger.info(f"S3 Prefix: {self.config['s3_prefix']}")
@@ -187,29 +182,18 @@ class LightGBMBinaryClassifierV2:
     
     def train_model(self):
         """
-        LightGBMモデルを訓練
+        Scikit-learnモデルを訓練
         """
         if self.X_train is None:
             raise ValueError("Data not generated. Call generate_data() first.")
             
-        logger.info("Training LightGBM model...")
+        logger.info("Training Scikit-learn model...")
         
-        # LightGBMデータセット作成
-        train_data = lgb.Dataset(self.X_train, label=self.y_train)
-        val_data = lgb.Dataset(self.X_val, label=self.y_val, reference=train_data)
+        # GradientBoostingClassifier作成
+        self.model = GradientBoostingClassifier(**self.config['sklearn_params'])
         
         # モデル訓練
-        self.model = lgb.train(
-            self.config['lgb_params'],
-            train_data,
-            num_boost_round=self.config['num_boost_round'],
-            valid_sets=[train_data, val_data],
-            valid_names=['train', 'val'],
-            callbacks=[
-                lgb.early_stopping(self.config['early_stopping_rounds']),
-                lgb.log_evaluation(period=10)
-            ]
-        )
+        self.model.fit(self.X_train, self.y_train)
         
         # モデル評価
         self._evaluate_model()
@@ -225,7 +209,7 @@ class LightGBMBinaryClassifierV2:
             raise ValueError("Model not trained. Call train_model() first.")
             
         # 予測
-        y_pred_proba = self.model.predict(self.X_test, num_iteration=self.model.best_iteration)
+        y_pred_proba = self.model.predict_proba(self.X_test)[:, 1]
         y_pred = (y_pred_proba > 0.5).astype(int)
         
         # メトリクス計算
@@ -262,12 +246,12 @@ class LightGBMBinaryClassifierV2:
         # ローカルディレクトリ作成
         os.makedirs('model', exist_ok=True)
         
-        # モデルをpickle形式で保存（LightGBMのunordered_map::atエラー回避）
+        # モデルをpickle形式で保存
         with open('model/model.pkl', 'wb') as f:
             pickle.dump(self.model, f)
         
         # テキスト形式でも保存（デバッグ用）
-        self.model.save_model('model/model.txt')
+        # self.model.save_model('model/model.txt')  # scikit-learnには不要
         
         # tar.gz形式でアーカイブ
         with tarfile.open('model.tar.gz', 'w:gz') as tar:
@@ -367,8 +351,7 @@ def output_fn(prediction, content_type):
             f.write(inference_code)
         
         # requirements.txt作成
-        requirements = '''lightgbm>=3.3.0
-numpy>=1.21.0
+        requirements = '''numpy>=1.21.0
 scikit-learn>=1.0.0
 '''
         
@@ -389,7 +372,7 @@ scikit-learn>=1.0.0
         # モデル保存
         model_uri = self.save_model()
         
-        # LightGBM用のコンテナイメージ取得
+        # Scikit-learn用のコンテナイメージ取得
         image_uri = retrieve(
             framework='sklearn',
             region=self.region,
@@ -643,7 +626,7 @@ scikit-learn>=1.0.0
         """
         完全なパイプラインを実行
         """
-        logger.info("Starting complete LightGBM + Model Monitor pipeline...")
+        logger.info("Starting complete Scikit-learn + Model Monitor pipeline...")
         
         try:
             # 1. データ生成
@@ -698,23 +681,20 @@ def main():
     custom_config = {
         'n_samples': 2500,
         'n_features': 30,
-        'lgb_params': {
-            'objective': 'binary',
-            'metric': 'binary_logloss',
-            'boosting_type': 'gbdt',
-            'num_leaves': 31,
-            'learning_rate': 0.05,
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
-            'verbose': -1,
+        'sklearn_params': {
+            'n_estimators': 100,
+            'learning_rate': 0.1,
+            'max_depth': 3,
+            'min_samples_split': 2,
+            'min_samples_leaf': 1,
+            'subsample': 0.8,
             'random_state': 42
         },
         'monitoring_cron': 'cron(0/10 * ? * * *)',  # 10分毎
     }
     
     # パイプライン実行
-    classifier = LightGBMBinaryClassifierV2(config=custom_config)
+    classifier = ScikitLearnBinaryClassifierV2(config=custom_config)
     
     try:
         result = classifier.run_complete_pipeline()

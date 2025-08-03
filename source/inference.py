@@ -1,8 +1,8 @@
 import json
 import pickle
 import numpy as np
+import lightgbm as lgb
 import logging
-from sklearn.ensemble import GradientBoostingClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -43,18 +43,13 @@ def predict_fn(input_data, model):
     """予測を実行"""
     try:
         # 確率予測
-        if hasattr(model, 'predict_proba'):
-            probabilities = model.predict_proba(input_data)
-            # 2値分類の場合、クラス1の確率を返す
-            if len(probabilities.shape) == 2 and probabilities.shape[1] == 2:
-                predictions = probabilities[:, 1]
-            else:
-                predictions = probabilities
+        probabilities = model.predict(input_data, num_iteration=model.best_iteration)
+        
+        # 2値分類の場合、クラス1の確率を返す
+        if len(probabilities.shape) == 1:
+            predictions = probabilities
         else:
-            # predict_probaがない場合はdecision_functionを使用
-            predictions = model.decision_function(input_data)
-            # シグモイド関数で確率に変換
-            predictions = 1 / (1 + np.exp(-predictions))
+            predictions = probabilities[:, 1]
             
         # 閾値0.5でクラス予測
         classes = (predictions > 0.5).astype(int)
